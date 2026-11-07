@@ -1,9 +1,8 @@
 from fastapi import FastAPI
-from gateway.db import init_db
+from gateway.db import init_db, add_project, get_projects
 
 app = FastAPI(title="TraceChain Gateway")
 
-projects_db = []
 @app.on_event("startup")
 def startup():
     init_db()
@@ -23,12 +22,16 @@ def get_trace():
 
 @app.post("/projects")
 def create_project(project: dict):
-    projects_db.append(project)
+    add_project(
+        project.get("name"),
+        project.get("description"),
+        project.get("target_amount")
+    )
     return {"status": "created", "project": project}
 
 @app.get("/projects")
 def list_projects():
-    return {"projects": projects_db}
+    return {"projects": get_projects()}
 
 @app.post("/allocations")
 def create_allocation(allocation: dict):
