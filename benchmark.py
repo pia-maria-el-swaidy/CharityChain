@@ -1,14 +1,14 @@
 """TraceChain - Exercise 6: measurements for the report.
 
-    python benchmark.py --docker     uses `docker compose` (starts the three containers of docker-compose.yml,
+    python benchmark.py --Dockerfile     uses `Dockerfile compose` (starts the three containers of Dockerfile-compose.yml,
                                      reachable on ports 5001-5003)
     python benchmark.py --local      starts three local node processes by itself (no Docker needed)
 
 Options:  --only 1 2 3   run only some experiments        --samples 10   blocks mined in experiment 1
           --tx 600       transactions sent in experiment 2   --time-limit 40  seconds allowed for experiment 2
           --prefill 5    blocks mined before the failure test of experiment 3
-          --no-up        (docker) the containers are already running
-          --down         (docker) run `docker compose down` at the end
+          --no-up        (Dockerfile) the containers are already running
+          --down         (Dockerfile) run `Dockerfile compose down` at the end
 
 Experiment 1: time to mine one block (difficulty 4) and time for it to reach all nodes
 Experiment 2: transactions per minute that can be submitted before the node slows down
@@ -79,7 +79,7 @@ class DockerCluster:
         self.urls = [f"http://127.0.0.1:{p}" for p in (5001, 5002, 5003)]
 
     def _compose(self, *args):
-        subprocess.run(["docker", "compose", "-f", os.path.join(HERE, "docker-compose.yml"), *args],
+        subprocess.run(["Dockerfile", "compose", "-f", os.path.join(HERE, "Dockerfile-compose.yml"), *args],
                        cwd=HERE, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def up(self):
@@ -327,15 +327,15 @@ def main():
     global signatures
     ap = argparse.ArgumentParser()
     mode = ap.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--docker", action="store_true")
+    mode.add_argument("--Dockerfile", action="store_true")
     mode.add_argument("--local", action="store_true")
     ap.add_argument("--only", nargs="+", choices=["1", "2", "3"], default=["1", "2", "3"])
     ap.add_argument("--samples", type=int, default=10)
     ap.add_argument("--tx", type=int, default=600)
     ap.add_argument("--time-limit", type=float, default=40)
     ap.add_argument("--prefill", type=int, default=5)
-    ap.add_argument("--no-up", action="store_true", help="(docker) the containers are already running")
-    ap.add_argument("--down", action="store_true", help="(docker) docker compose down at the end")
+    ap.add_argument("--no-up", action="store_true", help="(Dockerfile) the containers are already running")
+    ap.add_argument("--down", action="store_true", help="(Dockerfile) Dockerfile compose down at the end")
     ap.add_argument("--output-dir", default=HERE)
     args = ap.parse_args()
 
