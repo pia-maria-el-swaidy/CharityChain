@@ -36,7 +36,7 @@ import bft
 import core
 import rules
 import wallet
-
+import chain_storage
 app = Flask(__name__)
 lock = threading.RLock()                  # protects the ledger and the consensus engine
 sync_lock = threading.Lock()              # one synchronization with the peers at a time
@@ -54,6 +54,8 @@ own_urls = set()
 require_signatures = True
 lab_mode = False
 data_dir = ""
+use_db = False
+db_node = ""
 engine = None                             # the consensus engine (None for an observer)
 timeouts = bft.Timeouts()
 
@@ -232,7 +234,9 @@ def _write_atomic(path, text):
 
 
 def store_block(block):
-    if data_dir:
+    if use_db:
+        chain_storage.save_bft_block(db_node, block)
+    elif data_dir:
         with open(_path("chain.jsonl"), "a") as f:
             f.write(json.dumps(block) + "\n")
             f.flush()
@@ -240,12 +244,18 @@ def store_block(block):
 
 
 def rewrite_chain_file():
-    if data_dir:
+    if use_db:
+        chain_storage.replace_bft_chain(db_node, S.chain[1:])
+    elif data_dir:
         _write_atomic(_path("chain.jsonl"), "".join(json.dumps(b) + "\n" for b in S.chain[1:]))
 
 
 def save_engine():
-    if data_dir and engine is not None:
+    if engine is None:
+        return
+    if use_db:
+        chain_storage.save_bft_engine(db_node, engine.snapshot())
+    elif data_dir:
         _write_atomic(_path("engine.json"), json.dumps(engine.snapshot()))
 
 
@@ -546,7 +556,7 @@ def tamper():
 # ---------------------------------------------------------------- start
 
 def setup(args):
-    global validators, my_key, my_pub, require_signatures, lab_mode, data_dir, engine, timeouts
+    global validators, my_key, my_pub, require_signatures, lab_mode, data_dir, engine, timeouts, use_db, db_node
     validators = [v.strip() for v in args.validators.split(",") if v.strip()]
     error = None
     if not validators:
@@ -575,18 +585,24 @@ def setup(args):
     for url in (u.strip().rstrip("/") for u in args.peers.split(",")):
         if url and url not in own_urls:
             peers.add(url)
-
+    use_db = bool(os.environ.get("DATABASE_URL"))
+    db_node = args.node_name or f"node_{args.port}"
     S.chain = [bft.make_genesis(validators)]
-    if data_dir:
+    if use_db:
+        chain_storage.init_bft_db()
+        S.chain += chain_storage.load_bft_chain(db_node)
+    elif data_dir:
         os.makedirs(data_dir, exist_ok=True)
         if os.path.exists(_path("chain.jsonl")):
             with open(_path("chain.jsonl")) as f:
                 S.chain += [json.loads(line) for line in f if line.strip()]
-            keep = bft.valid_prefix(S.chain, validators, require_signatures)
-            if keep < len(S.chain):
-                print(f"warning: the saved chain is damaged after block {keep - 1}: keeping the valid beginning", file=sys.stderr)
-                S.chain = S.chain[:max(keep, 1)]
-                rewrite_chain_file()
+    if len(S.chain) > 1:
+        keep = bft.valid_prefix(S.chain, validators, require_signatures)
+        if keep < len(S.chain):
+            print(f"warning: the saved chain is damaged after block {keep - 1}: keeping the valid beginning",
+                  file=sys.stderr)
+            S.chain = S.chain[:max(keep, 1)]
+            rewrite_chain_file()
     S.committed = rules.new_state()
     S.pending_state = copy.deepcopy(S.committed)
     rebuild_all()
@@ -595,13 +611,17 @@ def setup(args):
     if my_key:
         engine = bft.Engine(validators, LedgerHost(), my_key, timeouts)
         engine.start_height(len(S.chain), time.time())
-        if data_dir and os.path.exists(_path("engine.json")):
+        snap = None
+        if use_db:
+            snap = chain_storage.load_bft_engine(db_node)
+        elif data_dir and os.path.exists(_path("engine.json")):
             try:
                 with open(_path("engine.json")) as f:
-                    if engine.restore(json.load(f), time.time()):
-                        print("consensus state restored from disk")
+                    snap = json.load(f)
             except (OSError, ValueError):
-                pass
+                snap = None
+        if snap and engine.restore(snap, time.time()):
+            print("consensus state restored from", "PostgreSQL" if use_db else "disk")
 
 
 if __name__ == "__main__":
@@ -616,6 +636,8 @@ if __name__ == "__main__":
                         help="this node's private key (without it the node is an observer)")
     parser.add_argument("--data-dir", default=os.environ.get("DATA_DIR", ""),
                         help="folder where the chain and the voting state are saved (empty: memory only)")
+    parser.add_argument("--node-name", default=os.environ.get("NODE_NAME", ""),
+                        help="name of this validator's rows in PostgreSQL")
     parser.add_argument("--timeout-propose", type=float, default=float(os.environ.get("TIMEOUT_PROPOSE", 2.0)))
     parser.add_argument("--timeout-prevote", type=float, default=float(os.environ.get("TIMEOUT_PREVOTE", 1.0)))
     parser.add_argument("--timeout-precommit", type=float, default=float(os.environ.get("TIMEOUT_PRECOMMIT", 1.0)))
