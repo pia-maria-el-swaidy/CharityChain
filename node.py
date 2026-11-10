@@ -126,6 +126,7 @@ def run_mining_job(template):
             else:
                 template["hash"] = result
                 blockchain.chain.append(template)
+                chain_storage.save_chain(CHAIN_DB, blockchain.chain)
                 mined = {t["id"] for t in template["transactions"]}
                 blockchain.pending = [t for t in blockchain.pending if t["id"] not in mined]
                 mining.update(state="done", block=template, seconds=round(time.time() - mining["started"], 3),
@@ -302,6 +303,7 @@ def resolve():
         requeued, dropped = [], []
         if best is not None:
             old_chain, blockchain.chain = blockchain.chain, best
+            chain_storage.save_chain(CHAIN_DB, blockchain.chain)
             requeued, dropped = recover_orphans(old_chain, best)
         response = {"replaced": best is not None, "length": len(blockchain.chain)}
         if requeued:
@@ -383,5 +385,14 @@ if __name__ == "__main__":
         threading.Thread(target=sync_on_start, args=(args.port,), daemon=True).start()
     if args.auto_mine > 0:
         threading.Thread(target=auto_miner, args=(args.auto_mine,), daemon=True).start()
+    CHAIN_DB = f"node_{args.port}.db"
+    chain_storage.init_chain_db(CHAIN_DB)
+    saved = chain_storage.load_chain(CHAIN_DB)
+    if saved:
+        if core.valid_chain(saved, check_rules=check_rules, require_signatures=require_signatures):
+            blockchain.chain = saved
+            print(f"loaded {len(saved)} blocks from {CHAIN_DB}")
+        else:
+            print(f"WARNING: saved chain in {CHAIN_DB} is invalid, starting from genesis")
     print(f"node {node_id} listening on port {args.port}, peers: {sorted(peers) or 'none'}")
     app.run(host=args.host, port=args.port, threaded=True)
