@@ -12,7 +12,7 @@ import os
 import threading
 import time
 import uuid
-
+import chain_storage
 import requests
 from flask import Flask, jsonify, request
 
@@ -33,7 +33,7 @@ require_signatures = True         # Exercise 4; turn off with --no-signatures fo
 mining_delay = 0.0                # lab only (--mining-delay): pretend that Proof of Work is slow
 requeue_orphans = True            # Exercise 5; turn off with --no-requeue to reproduce the loss of d2 in Part 4
 mining = {"job": 0, "state": "idle"}   # Exercise 5: state of the background mining job
-
+CHAIN_DB = "node_chain.db"
 
 def env_flag(name):
     """True if the environment variable is set to 1, true or yes (used for Docker Compose settings)."""

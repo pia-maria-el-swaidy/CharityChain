@@ -1,72 +1,34 @@
-import sqlite3
+import os
+import psycopg2
 
-DB_PATH = "gateway.db"
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://tracechain:tracechain123@localhost:5432/tracechain")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        public_key TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS projects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL,
-        description TEXT,
-        target_amount REAL
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS receipts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        expense_id TEXT,
-        file_hash TEXT NOT NULL,
-        filename TEXT
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS tx_index (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tx_id TEXT UNIQUE NOT NULL,
-        project_name TEXT,
-        type TEXT,
-        status TEXT DEFAULT 'pending'
-    )
-    """)
-
+    cur.execute("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT, public_key TEXT UNIQUE, private_key_encrypted TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS projects (id SERIAL PRIMARY KEY, name TEXT, description TEXT, target_amount INTEGER)")
+    cur.execute("CREATE TABLE IF NOT EXISTS receipts (id SERIAL PRIMARY KEY, expense_id TEXT, hash TEXT, file_path TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS tx_index (tx_id TEXT PRIMARY KEY, block_index INTEGER)")
     conn.commit()
     conn.close()
 
 def add_project(name, description, target_amount):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO projects (name, description, target_amount) VALUES (?, ?, ?)",
-        (name, description, target_amount)
-    )
+    cur.execute("INSERT INTO projects (name, description, target_amount) VALUES (%s, %s, %s) RETURNING id", (name, description, target_amount))
+    new_id = cur.fetchone()[0]
     conn.commit()
     conn.close()
+    return new_id
 
 def get_projects():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT id, name, description, target_amount FROM projects")
     rows = cur.fetchall()
     conn.close()
-    return [
-        {"id": r[0], "name": r[1], "description": r[2], "target_amount": r[3]}
-        for r in rows
-    ]
-
-if __name__ == "__main__":
-    init_db()
-    print("DB created")
+    return [{"id": r[0], "name": r[1], "description": r[2], "target_amount": r[3]} for r in rows]
