@@ -1,48 +1,95 @@
-# Three TraceChain nodes on one network.   Start:  docker compose up -d --build
-# From your computer the nodes are:  http://127.0.0.1:5001   http://127.0.0.1:5002   http://127.0.0.1:5003
-# Between themselves the containers use their service names:  http://node1:5000 ...
+# TraceChain, Stage 2: four BFT validators and one observer on one network.
+#
+#   1. python make_validators.py          creates the validator keys (validators.json and .env)
+#   2. docker compose up -d --build       starts node1 ... node4 and the observer
+#
+# From your computer the nodes are  http://127.0.0.1:5001 ... http://127.0.0.1:5004  and the observer 5005
+# Between themselves the containers use their service names  http://node1:5000 ...
+# A block is final when 3 of the 4 validators have signed it (the commit certificate).
+# Every node keeps its ledger in a volume: it survives  docker compose stop / start  and even  docker compose down.
+# (Older setups: docker-compose.poa.yml = Proof of Authority, docker-compose.pow.yml = Proof of Work.)
 
 x-node: &node
   build: .
   image: tracechain-node
+  command: ["python", "node_bft.py"]
   restart: "no"            # a stopped node stays stopped, so that you can test failures
   init: true               # a small init process as PID 1, so that "docker stop" ends the node at once
   healthcheck:
-    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/chain')"]
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/status')"]
     interval: 5s
     timeout: 3s
     retries: 5
 
 x-env: &env
-  # the peer list: the same variable for all nodes (a node ignores its own URL, given in SELF_URL)
-  PEERS: "http://node1:5000,http://node2:5000,http://node3:5000"
-  # SYNC_ON_START: "1"     # a restarted node fetches the chain from its peers by itself
-  # AUTO_MINE: "5"         # mine automatically every 5 seconds when transactions are pending
-  # NO_SIGNATURES: "1"     # accept unsigned transactions (the unsigned experiments only)
+  # the same list for all nodes (a node ignores its own URL, given in SELF_URL)
+  PEERS: "http://node1:5000,http://node2:5000,http://node3:5000,http://node4:5000,http://observer:5000"
+  # the public keys of the four validators, in turn order (from .env, written by make_validators.py)
+  VALIDATORS: "${VALIDATORS:?run  python make_validators.py  first}"
+  DATA_DIR: "/data"        # the chain and the voting state are saved here (a volume)
+  TIMEOUT_PROPOSE: "2"     # seconds a validator waits for the proposal of the round ...
+  TIMEOUT_PREVOTE: "1"     # ... for the prevotes ...
+  TIMEOUT_PRECOMMIT: "1"   # ... for the precommits; every further round waits TIMEOUT_DELTA seconds longer
+  TIMEOUT_DELTA: "0.5"
+  SYNC_INTERVAL: "5"       # every 5 seconds a node asks its peers for the blocks it is missing
+  # NO_SIGNATURES: "1"     # accept unsigned transactions (quick experiments only)
+  # LAB: "1"               # enable the lab-only /tamper endpoint
 
 services:
   node1:
     <<: *node
     hostname: node1
     ports: ["5001:5000"]
+    volumes: ["node1-data:/data"]
     environment:
       <<: *env
       SELF_URL: "http://node1:5000"
+      VALIDATOR_KEY: "${VALIDATOR_KEY_1:?run  python make_validators.py  first}"
 
   node2:
     <<: *node
     hostname: node2
     ports: ["5002:5000"]
+    volumes: ["node2-data:/data"]
     environment:
       <<: *env
       SELF_URL: "http://node2:5000"
+      VALIDATOR_KEY: "${VALIDATOR_KEY_2:?run  python make_validators.py  first}"
 
   node3:
     <<: *node
     hostname: node3
     ports: ["5003:5000"]
+    volumes: ["node3-data:/data"]
     environment:
       <<: *env
       SELF_URL: "http://node3:5000"
+      VALIDATOR_KEY: "${VALIDATOR_KEY_3:?run  python make_validators.py  first}"
 
-# All three services are on the default network created by Compose, where each service name is a host name.
+  node4:
+    <<: *node
+    hostname: node4
+    ports: ["5004:5000"]
+    volumes: ["node4-data:/data"]
+    environment:
+      <<: *env
+      SELF_URL: "http://node4:5000"
+      VALIDATOR_KEY: "${VALIDATOR_KEY_4:?run  python make_validators.py  first}"
+
+  # An observer has no key: it never votes. It checks every certificate itself, so a donor, an auditor or the
+  # API gateway can read the ledger from it without trusting any validator.
+  observer:
+    <<: *node
+    hostname: observer
+    ports: ["5005:5000"]
+    volumes: ["observer-data:/data"]
+    environment:
+      <<: *env
+      SELF_URL: "http://observer:5000"
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  observer-data:

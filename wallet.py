@@ -41,6 +41,12 @@ def generate_keypair():
     return private, public
 
 
+def public_key_of(private_hex: str) -> str:
+    """The public key (hex) that belongs to a private key (hex)."""
+    sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex))
+    return sk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+
+
 def sign(private_hex: str, message: str) -> str:
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex))
     return sk.sign(message.encode("utf-8")).hex()
