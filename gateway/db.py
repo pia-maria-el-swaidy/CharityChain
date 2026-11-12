@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     donor_id UUID REFERENCES donors(donor_id) ON DELETE RESTRICT,
     charity_id UUID NOT NULL REFERENCES charities(charity_id) ON DELETE RESTRICT,
     campaign_id UUID REFERENCES campaigns(campaign_id) ON DELETE RESTRICT,
+    parent_tx_id TEXT,                         -- DONATION for an ALLOCATION, ALLOCATION for a DISBURSEMENT
     recipient_ref TEXT,
     receipt_hash CHAR(64),
     amount BIGINT NOT NULL CHECK (amount > 0), -- minor units (cents)

@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -16,13 +17,19 @@ from gateway.db import (
     create_transaction,
 )
 from gateway import chain_client, chain_sync
-from blockchain.hashing import compute_tx_hash
+from gateway.hashing import compute_tx_hash
 
 app = Flask(__name__)
 CORS(app)
 init_db()
 
 TX_TYPES = {"DONATION", "ALLOCATION", "DISBURSEMENT"}
+
+# Which parent type each child type must point to
+PARENT_TYPE = {"ALLOCATION": "DONATION", "DISBURSEMENT": "ALLOCATION"}
+
+HEX64 = re.compile(r"[0-9a-f]{64}")
+
 
 # ---------- helpers ----------
 def _uuid_or_none(value, name):
@@ -32,6 +39,7 @@ def _uuid_or_none(value, name):
         return str(uuid.UUID(str(value))).lower()
     except ValueError:
         raise ValueError(f"{name} is not a valid UUID")
+
 
 def build_tx(data):
     if not isinstance(data, dict):
@@ -57,14 +65,25 @@ def build_tx(data):
     if tx_type == "DISBURSEMENT" and not data.get("recipient_ref"):
         raise ValueError("recipient_ref is required for DISBURSEMENT")
 
+    parent_tx_id = str(data.get("parent_tx_id") or "").strip() or None
+    receipt_hash = str(data.get("receipt_hash") or "").strip().lower() or None
+    if tx_type == "DONATION" and parent_tx_id:
+        raise ValueError("parent_tx_id must not be set for DONATION")
+    if tx_type in PARENT_TYPE and not parent_tx_id:
+        raise ValueError(f"parent_tx_id is required for {tx_type}")
+    if tx_type == "DISBURSEMENT":
+        if not receipt_hash or not HEX64.fullmatch(receipt_hash):
+            raise ValueError("receipt_hash must be 64 hex characters for DISBURSEMENT")
+
     tx = {
         "tx_id": str(uuid.uuid4()),
         "tx_type": tx_type,
         "donor_id": donor_id,
         "charity_id": charity_id,
         "campaign_id": _uuid_or_none(data.get("campaign_id"), "campaign_id"),
+        "parent_tx_id": parent_tx_id,
         "recipient_ref": data.get("recipient_ref") or None,
-        "receipt_hash": data.get("receipt_hash") or None,
+        "receipt_hash": receipt_hash,
         "amount": amount,
         "currency": currency,
         "memo": data.get("memo") or None,
@@ -73,6 +92,24 @@ def build_tx(data):
     }
     tx["tx_hash"] = compute_tx_hash(tx)
     return tx
+
+
+def check_parent(tx):
+    """Return an error string, or None if the parent is valid."""
+    expected = PARENT_TYPE.get(tx["tx_type"])
+    if not expected:
+        return None
+    parent = get_transaction(tx["parent_tx_id"])
+    if not parent:
+        return "parent_tx_id does not exist"
+    if parent["tx_type"] != expected:
+        return f"parent of {tx['tx_type']} must be a {expected}"
+    if str(parent["charity_id"]) != tx["charity_id"]:
+        return "parent transaction belongs to a different charity"
+    if parent["status"] == "REJECTED":
+        return "parent transaction was rejected"
+    return None
+
 
 def public_tx(row):
     """JSON-safe view. Hides the donor id of anonymous donors."""
@@ -86,15 +123,18 @@ def public_tx(row):
             r[k] = str(v)
     return r
 
+
 # ---------- health ----------
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "gateway ok"})
 
+
 # ---------- campaigns ----------
 @app.route("/api/campaigns", methods=["GET"])
 def list_campaigns():
     return jsonify([dict(r) for r in get_campaigns()])
+
 
 @app.route("/api/campaigns", methods=["POST"])
 def create_campaign():
@@ -111,6 +151,7 @@ def create_campaign():
         return jsonify({"error": "unknown charity_id"}), 400
     return jsonify({"campaign_id": str(new_id)}), 201
 
+
 # ---------- donors ----------
 @app.route("/api/donors", methods=["POST"])
 def create_donor():
@@ -124,10 +165,12 @@ def create_donor():
         return jsonify({"error": "email already exists"}), 409
     return jsonify({"donor_id": str(new_id)}), 201
 
+
 # ---------- charities ----------
 @app.route("/api/charities", methods=["GET"])
 def list_charities():
     return jsonify([{**dict(r), "charity_id": str(r["charity_id"])} for r in get_charities()])
+
 
 @app.route("/api/charities", methods=["POST"])
 def create_charity():
@@ -140,6 +183,7 @@ def create_charity():
         return jsonify({"error": "wallet_ref already exists"}), 409
     return jsonify({"charity_id": str(new_id)}), 201
 
+
 # ---------- transactions ----------
 @app.route("/api/transactions", methods=["POST"])
 def create_tx():
@@ -147,6 +191,9 @@ def create_tx():
         tx = build_tx(request.get_json(silent=True))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    err = check_parent(tx)
+    if err:
+        return jsonify({"error": err}), 400
     try:
         create_transaction(tx, lambda t: chain_client.submit_transaction(chain_client.to_chain_tx(t)))
     except psycopg2.errors.ForeignKeyViolation:
@@ -156,6 +203,7 @@ def create_tx():
     except chain_client.ChainUnavailable:
         return jsonify({"error": "no blockchain node reachable, nothing was saved"}), 503
     return jsonify({"tx_id": tx["tx_id"], "tx_hash": tx["tx_hash"], "status": "PENDING"}), 201
+
 
 @app.route("/api/transactions", methods=["GET"])
 def list_txs():
@@ -170,6 +218,7 @@ def list_txs():
         return jsonify({"error": "invalid status"}), 400
     return jsonify([public_tx(r) for r in list_transactions(campaign_id, status, limit, offset)])
 
+
 @app.route("/api/transactions/<tx_id>", methods=["GET"])
 def get_tx(tx_id):
     # tx_id is TEXT, NOT UUID - Michele's example is "d1", so do NOT validate as UUID
@@ -178,7 +227,8 @@ def get_tx(tx_id):
     row = get_transaction(tx_id)
     return (jsonify(public_tx(row)), 200) if row else (jsonify({"error": "not found"}), 404)
 
-# ---------- trace + sync (Option B: HTTP only, chain is source of truth) ----------
+
+# ---------- trace + sync (HTTP only, chain is source of truth) ----------
 @app.route("/api/donations/<donation_id>/trace", methods=["GET"])
 def trace(donation_id):
     try:
@@ -187,12 +237,14 @@ def trace(donation_id):
         return jsonify({"error": "no blockchain node reachable"}), 503
     return jsonify(body), code
 
+
 @app.route("/api/chain/sync", methods=["POST"])
 def sync_now():
     try:
         return jsonify({"blocks_scanned": chain_sync.sync_once()})
     except chain_client.ChainUnavailable:
         return jsonify({"error": "no blockchain node reachable"}), 503
+
 
 if __name__ == "__main__":
     debug = os.environ.get("FLASK_DEBUG") == "1"
