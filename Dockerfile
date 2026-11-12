@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # the node code: core (transactions, hashing), rules (R1-R4, replay, trace), wallet (signatures),
 # bft + node_bft (BFT network, the default), poa + node_poa (Proof of Authority), node (old Proof of Work node)
-COPY core.py rules.py wallet.py bft.py node_bft.py poa.py node_poa.py node.py ./
+COPY core.py rules.py wallet.py bft.py node_bft.py poa.py node_poa.py node.py chain_storage.py ./
 
 # settings are read from environment variables (see docker-compose.yml)
 ENV HOST=0.0.0.0 \
