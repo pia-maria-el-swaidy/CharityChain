@@ -1,3 +1,4 @@
+#This Python file is essentially the database and wallet management layer of a blockchain-based charitable donation system.import osfrom contextlib import contextmanager
 import os
 from contextlib import contextmanager
 from gateway import keys

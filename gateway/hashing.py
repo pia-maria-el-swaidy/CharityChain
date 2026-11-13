@@ -1,3 +1,8 @@
+#This code is a transaction hashing and data integrity module for your blockchain - based charity donation platform.
+#Its main purpose is to generate a unique SHA - 256 hash for every transaction based on its important data.
+#In simple terms, it creates a digital fingerprint for a transaction.If someone changes the transaction's information, the resulting hash will be different.
+#This helps your system detect transaction tampering and verify data integrity.
+
 import hashlib
 import json
 from datetime import datetime, timezone

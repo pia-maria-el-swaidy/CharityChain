@@ -1,5 +1,13 @@
 """Gateway-side wallets: ed25519 keys + signing. Reproduces Michele's signing contract
 (wallet.py + core.tx_signing_string) WITHOUT importing her code. tests/test_signing.py checks they match."""
+"This file is your Wallet and Digital Signature Module."
+"Its five main responsibilities are:"
+"Generate Ed25519 public/private keypairs."
+"Encrypt private keys using Fernet."
+"Decrypt private keys when needed."
+"Create standardized transaction signing messages."
+"Sign and verify transactions using Ed25519."
+
 import os
 
 from cryptography.exceptions import InvalidSignature
