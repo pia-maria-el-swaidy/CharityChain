@@ -282,3 +282,14 @@ def list_transactions(campaign_id=None, status=None, limit=50, offset=0):
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()
+
+def sum_children(parent_tx_id):
+    """Total cents already taken from a parent (not counting REJECTED children)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS total FROM transactions "
+                "WHERE parent_tx_id = %s AND status <> 'REJECTED'",
+                (parent_tx_id,),
+            )
+            return int(cur.fetchone()["total"])

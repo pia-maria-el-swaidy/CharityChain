@@ -14,7 +14,7 @@ from gateway.db import (
     add_transaction,
     add_donor, add_charity, get_charities,
     list_transactions, get_transaction,
-    create_transaction,
+    create_transaction, sum_children,
 )
 from gateway import chain_client, chain_sync
 from gateway.hashing import compute_tx_hash
@@ -29,6 +29,8 @@ TX_TYPES = {"DONATION", "ALLOCATION", "DISBURSEMENT"}
 PARENT_TYPE = {"ALLOCATION": "DONATION", "DISBURSEMENT": "ALLOCATION"}
 
 HEX64 = re.compile(r"[0-9a-f]{64}")
+
+_tx_lock = threading.Lock()   # one gateway process: check + save must not interleave
 
 
 # ---------- helpers ----------
@@ -108,6 +110,15 @@ def check_parent(tx):
         return "parent transaction belongs to a different charity"
     if parent["status"] == "REJECTED":
         return "parent transaction was rejected"
+    if parent["status"] != "COMMITTED":
+        return "parent transaction is not confirmed on the chain yet"
+    if tx["campaign_id"] and str(parent.get("campaign_id") or "") != tx["campaign_id"]:
+        return "campaign_id does not match the parent transaction"
+    if parent["currency"] != tx["currency"]:
+        return "currency does not match the parent transaction"
+    left = int(parent["amount"]) - sum_children(tx["parent_tx_id"])
+    if tx["amount"] > left:
+        return f"amount exceeds what is left in the parent ({left} cents left)"
     return None
 
 
@@ -191,17 +202,18 @@ def create_tx():
         tx = build_tx(request.get_json(silent=True))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    err = check_parent(tx)
-    if err:
-        return jsonify({"error": err}), 400
-    try:
-        create_transaction(tx, lambda t: chain_client.submit_transaction(chain_client.to_chain_tx(t)))
-    except psycopg2.errors.ForeignKeyViolation:
-        return jsonify({"error": "unknown donor_id, charity_id or campaign_id"}), 400
-    except chain_client.ChainRejected as e:
-        return jsonify({"error": "the chain rejected the transaction", "detail": e.body}), 422
-    except chain_client.ChainUnavailable:
-        return jsonify({"error": "no blockchain node reachable, nothing was saved"}), 503
+    with _tx_lock:
+        err = check_parent(tx)
+        if err:
+            return jsonify({"error": err}), 400
+        try:
+            create_transaction(tx, lambda t: chain_client.submit_transaction(chain_client.to_chain_tx(t)))
+        except psycopg2.errors.ForeignKeyViolation:
+            return jsonify({"error": "unknown donor_id, charity_id or campaign_id"}), 400
+        except chain_client.ChainRejected as e:
+            return jsonify({"error": "the chain rejected the transaction", "detail": e.body}), 422
+        except chain_client.ChainUnavailable:
+            return jsonify({"error": "no blockchain node reachable, nothing was saved"}), 503
     return jsonify({"tx_id": tx["tx_id"], "tx_hash": tx["tx_hash"], "status": "PENDING"}), 201
 
 
