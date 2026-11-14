@@ -18,10 +18,13 @@ from gateway.db import (
 )
 from gateway import chain_client, chain_sync
 from gateway.hashing import compute_tx_hash
+from gateway import auth
 
 app = Flask(__name__)
 CORS(app)
 init_db()
+app.register_blueprint(auth.bp)
+auth.init_auth()
 
 TX_TYPES = {"DONATION", "ALLOCATION", "DISBURSEMENT"}
 
