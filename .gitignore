@@ -15,3 +15,5 @@ wallets/
 data*/
 chain.jsonl
 engine.json
+
+node_modules/
