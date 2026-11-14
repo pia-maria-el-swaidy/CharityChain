@@ -113,7 +113,7 @@ services:
     environment:
       DATABASE_URL: postgresql://charity:${POSTGRES_PASSWORD}@db:5432/charitychain
       CHAIN_NODES: http://node1:5000,http://node2:5000,http://node3:5000,http://node4:5000
-      KEY_ENCRYPTION_SECRET: $${35hQXMz_0EH_q6UbCL9sBb0rqG0bIbkgiXTpBJItprM=}
+      KEY_ENCRYPTION_SECRET: ${KEY_ENCRYPTION_SECRET}
 volumes:
   node1-data:
   node2-data:
