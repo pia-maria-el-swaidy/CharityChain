@@ -6,7 +6,9 @@ import react from "@vitejs/plugin-react";
 //   /node/N/*   -> blockchain node N    (localhost:5001 ... 5004, observer = 5005)
 // The chain nodes do not send CORS headers, so this proxy is what lets the browser read them.
 const nodePorts = { 1: 5001, 2: 5002, 3: 5003, 4: 5004, 5: 5005 };
-const proxy = { "/api": { target: "http://localhost:8000", changeOrigin: true } };
+// GATEWAY_URL lets a local gateway on another port be used: $env:GATEWAY_URL="http://127.0.0.1:5000"
+const gatewayUrl = process.env.GATEWAY_URL || "http://localhost:8000";
+const proxy = { "/api": { target: gatewayUrl, changeOrigin: true } };
 for (const [n, port] of Object.entries(nodePorts)) {
   proxy[`/node/${n}`] = {
     target: `http://localhost:${port}`,
