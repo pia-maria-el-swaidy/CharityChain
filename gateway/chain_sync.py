@@ -1,3 +1,13 @@
+"""" This file is your Blockchain Synchronization Worker.
+Its main responsibilities are:
+Retrieve the last synchronized block position.
+Request new blocks from the blockchain.
+Extract transaction IDs.
+Match blockchain transactions with PostgreSQL records.
+Update pending transactions to committed.
+Record the next block to synchronize.
+Repeat the process automatically every 10 seconds."""
+
 import time
 
 from gateway import chain_client
