@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api";
+import { useAuth } from "../auth.jsx";
 import { usePoll } from "../hooks.jsx";
 import { money, toCents, sha256File, shortId, summarize } from "../format";
 import { ErrorNote, Loading } from "../components/Notice.jsx";
@@ -128,6 +129,7 @@ function ExpenseForm({ charity, allocations, campaigns, onDone }) {
 }
 
 export default function CharityDesk() {
+  const { user } = useAuth();
   const [selected, setSelected] = useState(localStorage.getItem("cc_charity") || "");
   const [message, setMessage] = useState("");
   const { data, error, loading, reload } = usePoll(loadOverview, { ms: 6000 });
@@ -136,7 +138,11 @@ export default function CharityDesk() {
   if (loading && !data) return <Loading />;
   if (data.charities.length === 0) return <p className="empty">No charities exist yet. Create one through the API or the demo seed script.</p>;
 
-  const charity = data.charities.find((c) => c.charity_id === selected) || data.charities[0];
+  // staff are tied to one charity; the picker only appears for an account without one
+  const fixedCharity = Boolean(user.charity_id);
+  const charity = data.charities.find((c) => c.charity_id === (user.charity_id || selected)) || data.charities[0];
+  const canAllocate = user.role === "CHARITY_ADMIN";
+  const canSpend = user.role === "FINANCE_OFFICER";
   const mine = data.txs.filter((t) => t.charity_id === charity.charity_id && t.status !== "REJECTED");
   const allocsAll = mine.filter((t) => t.tx_type === "ALLOCATION");
   const spendAll = mine.filter((t) => t.tx_type === "DISBURSEMENT");
@@ -153,11 +159,11 @@ export default function CharityDesk() {
   return (
     <>
       <h1 className="page-title">Charity desk</h1>
-      <label className="inline-select">Working as
+      {fixedCharity ? <p className="muted">{charity.name}</p> : <label className="inline-select">Working as
         <select value={charity.charity_id} onChange={(e) => { setSelected(e.target.value); localStorage.setItem("cc_charity", e.target.value); setMessage(""); }}>
           {data.charities.map((c) => <option key={c.charity_id} value={c.charity_id}>{c.name}</option>)}
         </select>
-      </label>
+      </label>}
 
       <dl className="stats">
         <div><dt>Received</dt><dd>{money(totals.donated)}</dd></div>
@@ -167,15 +173,19 @@ export default function CharityDesk() {
 
       {message && <p className="note note-ok" role="status">{message}</p>}
 
-      <div className="two-col">
-        <section>
-          <h2>Allocate a donation</h2>
-          <AllocateForm key={`a-${charity.charity_id}`} charity={charity} donations={donations} campaigns={data.campaigns} onDone={done} />
-        </section>
-        <section>
-          <h2>Record an expense</h2>
-          <ExpenseForm key={`e-${charity.charity_id}`} charity={charity} allocations={allocations} campaigns={data.campaigns} onDone={done} />
-        </section>
+      <div>
+        {canAllocate && (
+          <section>
+            <h2>Allocate a donation</h2>
+            <AllocateForm key={`a-${charity.charity_id}`} charity={charity} donations={donations} campaigns={data.campaigns} onDone={done} />
+          </section>
+        )}
+        {canSpend && (
+          <section>
+            <h2>Record an expense</h2>
+            <ExpenseForm key={`e-${charity.charity_id}`} charity={charity} allocations={allocations} campaigns={data.campaigns} onDone={done} />
+          </section>
+        )}
       </div>
 
       <section>

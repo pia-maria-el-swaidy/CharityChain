@@ -8,6 +8,9 @@ export class ApiError extends Error {
 }
 
 function describe(status, body) {
+  if (status === 401 && body?.error) return body.error;
+  if (status === 403) return "Your role is not allowed to do this.";
+  if (status === 429) return body?.error || "Too many attempts. Wait a few minutes.";
   if (status === 503) return "No blockchain node is reachable. Nothing was saved.";
   if (status === 422) {
     let reason = body?.detail;
@@ -17,17 +20,40 @@ function describe(status, body) {
   return body?.error || `Request failed (${status}).`;
 }
 
+// ----- sign-in token (kept in localStorage so a refresh does not sign you out) -----
+const TOKEN_KEY = "cc_token";
+export const getToken = () => localStorage.getItem(TOKEN_KEY);
+export function setToken(token) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+const unauthorizedListeners = new Set();
+export function onUnauthorized(fn) {
+  unauthorizedListeners.add(fn);
+  return () => unauthorizedListeners.delete(fn);
+}
+
 async function request(path, options = {}) {
+  const headers = { "Content-Type": "application/json" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
   let res;
   try {
-    res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+    res = await fetch(path, { ...options, headers });
   } catch {
     throw new ApiError(0, "Cannot reach the server. Check that the stack is running.");
   }
   const text = await res.text();
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
-  if (!res.ok) throw new ApiError(res.status, describe(res.status, body), body);
+  if (!res.ok) {
+    // an expired or revoked token on a normal request: forget it and let the app show the sign-in page
+    if (res.status === 401 && token && !path.startsWith("/api/auth/login")) {
+      setToken(null);
+      unauthorizedListeners.forEach((fn) => fn());
+    }
+    throw new ApiError(res.status, describe(res.status, body), body);
+  }
   return body;
 }
 
@@ -45,6 +71,12 @@ export const api = {
   sync: () => post("/api/chain/sync"),
   createDonor: (data) => post("/api/donors", data),
   createTx: (data) => post("/api/transactions", data),
+  // Accounts
+  login: (data) => post("/api/auth/login", data),
+  register: (data) => post("/api/auth/register", data),
+  me: () => request("/api/auth/me"),
+  users: () => request("/api/admin/users"),
+  createUser: (data) => post("/api/admin/users", data),
   // Blockchain nodes (1-4 = validators, 5 = observer)
   node: (n, path) => request(`/node/${n}${path}`),
 };
