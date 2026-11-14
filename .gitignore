@@ -10,3 +10,8 @@ uploads/
 .idea/
 .vscode/
 .DS_Store
+validators.json
+wallets/
+data*/
+chain.jsonl
+engine.json
