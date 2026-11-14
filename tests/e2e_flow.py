@@ -1,4 +1,4 @@
-"""End-to-end flow through the gateway, HTTP only (no imports from the chain code).
+﻿"""End-to-end flow through the gateway, HTTP only (no imports from the chain code).
 
 DONATION -> ALLOCATION -> DISBURSEMENT -> trace, then the rejections:
 the gateway refuses bad parents / bad receipt hashes (400), the chain refuses
@@ -137,13 +137,13 @@ def main():
     code, body = call("POST", "/api/transactions", {**no_recipient, "amount": 100})
     expect_status("DISBURSEMENT without recipient_ref -> 400", code, 400, body)
 
-    # ---- rejections by the chain (422) ----
+    # ---- over-allocation / over-spend: refused by the gateway (400) before the chain sees them ----
     code, body = call("POST", "/api/transactions", {**common, "tx_type": "ALLOCATION", "amount": 5000,
                                                     "parent_tx_id": don["tx_id"]})
-    expect_status("over-allocation (6000 + 5000 > 10000) -> 422", code, 422, body)
+    expect_status("over-allocation (6000 + 5000 > 10000) -> 400", code, 400, body)
 
     code, body = call("POST", "/api/transactions", {**disb_body, "amount": 4000})
-    expect_status("over-spend (2500 + 4000 > 6000) -> 422", code, 422, body)
+    expect_status("over-spend (2500 + 4000 > 6000) -> 400", code, 400, body)
 
     # ---- trace: the rejected transactions must not have changed anything ----
     code, trace = call("GET", f"/api/donations/{don['tx_id']}/trace")
