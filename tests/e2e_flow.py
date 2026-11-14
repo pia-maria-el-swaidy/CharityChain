@@ -1,4 +1,4 @@
-﻿"""End-to-end flow through the gateway, HTTP only (no imports from the chain code).
+"""End-to-end flow through the gateway, HTTP only (no imports from the chain code).
 
 DONATION -> ALLOCATION -> DISBURSEMENT -> trace, then the rejections:
 the gateway refuses bad parents / bad receipt hashes (400), the chain refuses
@@ -16,17 +16,19 @@ import time
 import urllib.error
 import urllib.request
 
+from auth_helpers import make_actors
+
 BASE = os.environ.get("GATEWAY_URL", "http://localhost:5000").rstrip("/")
 WAIT_SECONDS = int(os.environ.get("E2E_WAIT_SECONDS", "90"))
 
 failures = []
 
 
-def call(method, path, body=None):
+def call(method, path, body=None, token=None):
     """Return (http_status, parsed_json). Never raises on 4xx/5xx."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
+                                 headers=_headers(token))
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status, json.loads(resp.read() or b"null")
@@ -70,6 +72,21 @@ def stop_if_failed():
         sys.exit(1)
 
 
+TOKEN_FOR = {"DONATION": "donor_token", "ALLOCATION": "charity_token", "DISBURSEMENT": "finance_token"}
+
+
+def _headers(token):
+    h = {"Content-Type": "application/json"}
+    if token:
+        h["Authorization"] = "Bearer " + token
+    return h
+
+
+def post_tx(actors, body):
+    """POST a transaction with the token of the role that may create this tx_type."""
+    return call("POST", "/api/transactions", body, actors[TOKEN_FOR[body["tx_type"]]])
+
+
 def main():
     tag = secrets.token_hex(4)
     print(f"Gateway: {BASE}   run: {tag}\n")
@@ -82,7 +99,9 @@ def main():
         "display_name": f"E2E Donor {tag}", "email": f"e2e-{tag}@example.com"})
     expect_status("create donor", code, 201, donor)
     stop_if_failed()
-    cid, did = charity["charity_id"], donor["donor_id"]
+    cid = charity["charity_id"]
+    actors = make_actors(BASE, cid, tag)   # registered donor + charity admin + finance officer, with tokens
+    did = actors["donor_id"]
     code, camp = call("POST", "/api/campaigns", {
         "charity_id": cid, "title": f"E2E campaign {tag}", "goal_amount": 100000, "currency": "USD"})
     expect_status("create campaign", code, 201, camp)
@@ -91,14 +110,14 @@ def main():
     common = {"currency": "USD", "charity_id": cid, "campaign_id": camp_id}
 
     # ---- DONATION 10000 ----
-    code, don = call("POST", "/api/transactions", {**common, "tx_type": "DONATION", "amount": 10000, "donor_id": did})
+    code, don = post_tx(actors, {**common, "tx_type": "DONATION", "amount": 10000, "donor_id": did})
     expect_status("DONATION accepted (201)", code, 201, don)
     stop_if_failed()
     check("DONATION committed on chain", wait_committed(don["tx_id"]), "still not COMMITTED")
     stop_if_failed()
 
     # ---- ALLOCATION 6000 ----
-    code, alloc = call("POST", "/api/transactions", {**common, "tx_type": "ALLOCATION", "amount": 6000,
+    code, alloc = post_tx(actors, {**common, "tx_type": "ALLOCATION", "amount": 6000,
                                                      "parent_tx_id": don["tx_id"]})
     expect_status("ALLOCATION 6000 accepted (201)", code, 201, alloc)
     stop_if_failed()
@@ -109,40 +128,40 @@ def main():
     receipt = secrets.token_hex(32)  # 64 hex characters
     disb_body = {**common, "tx_type": "DISBURSEMENT", "amount": 2500, "parent_tx_id": alloc["tx_id"],
                  "recipient_ref": f"recipient-e2e-{tag}", "receipt_hash": receipt}
-    code, disb = call("POST", "/api/transactions", disb_body)
+    code, disb = post_tx(actors, disb_body)
     expect_status("DISBURSEMENT 2500 accepted (201)", code, 201, disb)
     stop_if_failed()
     check("DISBURSEMENT committed on chain", wait_committed(disb["tx_id"]), "still not COMMITTED")
     stop_if_failed()
 
     # ---- rejections by the gateway (400) ----
-    code, body = call("POST", "/api/transactions", {**common, "tx_type": "ALLOCATION", "amount": 100})
+    code, body = post_tx(actors, {**common, "tx_type": "ALLOCATION", "amount": 100})
     expect_status("ALLOCATION without parent_tx_id -> 400", code, 400, body)
 
-    code, body = call("POST", "/api/transactions", {**common, "tx_type": "ALLOCATION", "amount": 100,
+    code, body = post_tx(actors, {**common, "tx_type": "ALLOCATION", "amount": 100,
                                                     "parent_tx_id": alloc["tx_id"]})
     expect_status("ALLOCATION with an ALLOCATION as parent -> 400", code, 400, body)
 
-    code, body = call("POST", "/api/transactions", {**common, "tx_type": "ALLOCATION", "amount": 100,
+    code, body = post_tx(actors, {**common, "tx_type": "ALLOCATION", "amount": 100,
                                                     "parent_tx_id": "does-not-exist"})
     expect_status("ALLOCATION with unknown parent -> 400", code, 400, body)
 
-    code, body = call("POST", "/api/transactions", {**disb_body, "amount": 100, "parent_tx_id": don["tx_id"]})
+    code, body = post_tx(actors, {**disb_body, "amount": 100, "parent_tx_id": don["tx_id"]})
     expect_status("DISBURSEMENT with a DONATION as parent -> 400", code, 400, body)
 
-    code, body = call("POST", "/api/transactions", {**disb_body, "amount": 100, "receipt_hash": "abc"})
+    code, body = post_tx(actors, {**disb_body, "amount": 100, "receipt_hash": "abc"})
     expect_status("DISBURSEMENT with bad receipt_hash -> 400", code, 400, body)
 
     no_recipient = {k: v for k, v in disb_body.items() if k != "recipient_ref"}
-    code, body = call("POST", "/api/transactions", {**no_recipient, "amount": 100})
+    code, body = post_tx(actors, {**no_recipient, "amount": 100})
     expect_status("DISBURSEMENT without recipient_ref -> 400", code, 400, body)
 
     # ---- over-allocation / over-spend: refused by the gateway (400) before the chain sees them ----
-    code, body = call("POST", "/api/transactions", {**common, "tx_type": "ALLOCATION", "amount": 5000,
+    code, body = post_tx(actors, {**common, "tx_type": "ALLOCATION", "amount": 5000,
                                                     "parent_tx_id": don["tx_id"]})
     expect_status("over-allocation (6000 + 5000 > 10000) -> 400", code, 400, body)
 
-    code, body = call("POST", "/api/transactions", {**disb_body, "amount": 4000})
+    code, body = post_tx(actors, {**disb_body, "amount": 4000})
     expect_status("over-spend (2500 + 4000 > 6000) -> 400", code, 400, body)
 
     # ---- trace: the rejected transactions must not have changed anything ----

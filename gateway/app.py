@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 import psycopg2
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 
 from gateway.db import (
@@ -198,13 +198,34 @@ def create_charity():
     return jsonify({"charity_id": str(new_id)}), 201
 
 
+# ---------- who may create which transaction ----------
+ACTOR_ROLE = {"DONATION": "DONOR", "ALLOCATION": "CHARITY_ADMIN", "DISBURSEMENT": "FINANCE_OFFICER"}
+
+
+def check_actor(tx, user):
+    """None if the signed-in user may create this transaction, else an error text (HTTP 403)."""
+    needed = ACTOR_ROLE[tx["tx_type"]]
+    if user["role"] != needed:
+        return f"only a {needed} may create a {tx['tx_type']}"
+    if needed == "DONOR":
+        if str(user.get("donor_id")) != str(tx["donor_id"]):
+            return "donor_id does not match your account"
+    elif str(user.get("charity_id")) != str(tx["charity_id"]):
+        return "charity_id does not match your account"
+    return None
+
+
 # ---------- transactions ----------
 @app.route("/api/transactions", methods=["POST"])
+@auth.require_auth("DONOR", "CHARITY_ADMIN", "FINANCE_OFFICER")
 def create_tx():
     try:
         tx = build_tx(request.get_json(silent=True))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    denied = check_actor(tx, g.user)
+    if denied:
+        return jsonify({"error": denied}), 403
     with _tx_lock:
         err = check_parent(tx)
         if err:

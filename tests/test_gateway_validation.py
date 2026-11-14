@@ -1,37 +1,36 @@
-﻿"""Gateway validation tests (B3/B4). HTTP only: nothing is imported from the gateway or the chain.
+﻿"""Gateway validation tests (B3/B4) and actor rules (route protection). HTTP only: nothing is imported from the gateway.
 
-Needs the gateway (GATEWAY_URL, default http://localhost:5000) and the chain nodes running.
-If the gateway is not reachable, the whole module is skipped.
-Every run creates its own charity, donor and campaigns, so runs do not collide.
+Needs the gateway (GATEWAY_URL, default http://localhost:5000), the chain nodes and ADMIN_EMAIL / ADMIN_PASSWORD
+(environment or local .env). If the gateway is not reachable, the module is skipped.
+Every run creates its own charity, donor, staff and campaigns, so runs do not collide.
 """
-import json
 import os
 import secrets
+import sys
 import threading
 import time
 import urllib.error
-import urllib.request
+import uuid
+from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from auth_helpers import http, make_actors  # noqa: E402
+
 BASE = os.environ.get("GATEWAY_URL", "http://localhost:5000").rstrip("/")
 WAIT_SECONDS = int(os.environ.get("E2E_WAIT_SECONDS", "90"))
+TOKEN_FOR = {"DONATION": "donor_token", "ALLOCATION": "charity_token", "DISBURSEMENT": "finance_token"}
 
 
-def call(method, path, body=None):
+def call(method, path, body=None, token=None):
     """Return (http_status, parsed_json). Never raises on 4xx/5xx."""
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, json.loads(resp.read() or b"null")
-    except urllib.error.HTTPError as e:
-        raw = e.read()
-        try:
-            return e.code, json.loads(raw)
-        except ValueError:
-            return e.code, {"raw": raw.decode(errors="replace")}
+    return http(BASE, method, path, body, token)
+
+
+def post(body, actors):
+    """POST a transaction with the token of the role that may create this tx_type."""
+    return call("POST", "/api/transactions", body, actors[TOKEN_FOR[body["tx_type"]]])
 
 
 def wait_committed(tx_id):
@@ -55,78 +54,81 @@ def new_campaign(charity_id, tag, currency="USD"):
     return camp["campaign_id"]
 
 
-def committed(body):
-    code, tx = call("POST", "/api/transactions", body)
+def committed(body, actors):
+    code, tx = post(body, actors)
     assert code == 201, tx
     assert wait_committed(tx["tx_id"]), "transaction never became COMMITTED"
     return tx["tx_id"]
 
 
-@pytest.fixture(scope="module")
-def world():
+def require_gateway():
     try:
         call("GET", "/api/transactions?limit=1")
     except (urllib.error.URLError, OSError):
         pytest.skip(f"gateway not reachable at {BASE}")
-    tag = secrets.token_hex(4)
+
+
+def setup_charity(tag):
+    """New charity plus its donor, charity admin and finance officer. Returns (charity_id, actors)."""
     code, charity = call("POST", "/api/charities", {
         "name": f"VAL Charity {tag}", "description": "validation test", "wallet_ref": f"wallet-val-{tag}"})
     assert code == 201, charity
-    code, donor = call("POST", "/api/donors", {
-        "display_name": f"VAL Donor {tag}", "email": f"val-{tag}@example.com"})
-    assert code == 201, donor
-    cid, did = charity["charity_id"], donor["donor_id"]
+    cid = charity["charity_id"]
+    return cid, make_actors(BASE, cid, tag)
+
+
+@pytest.fixture(scope="module")
+def world():
+    require_gateway()
+    tag = secrets.token_hex(4)
+    cid, actors = setup_charity(tag)
+    did = actors["donor_id"]
     camp, other_camp = new_campaign(cid, tag + "-a"), new_campaign(cid, tag + "-b")
     common = {"currency": "USD", "charity_id": cid, "campaign_id": camp}
-    don = committed({**common, "tx_type": "DONATION", "amount": 10000, "donor_id": did})
-    alloc = committed({**common, "tx_type": "ALLOCATION", "amount": 6000, "parent_tx_id": don})
+    don = committed({**common, "tx_type": "DONATION", "amount": 10000, "donor_id": did}, actors)
+    alloc = committed({**common, "tx_type": "ALLOCATION", "amount": 6000, "parent_tx_id": don}, actors)
     receipt = secrets.token_hex(32)
     disb_body = {**common, "tx_type": "DISBURSEMENT", "amount": 2500, "parent_tx_id": alloc,
                  "recipient_ref": f"recipient-val-{tag}", "receipt_hash": receipt}
-    disb = committed(disb_body)
-    return {"tag": tag, "cid": cid, "did": did, "camp": camp, "other_camp": other_camp,
+    disb = committed(disb_body, actors)
+    return {**actors, "tag": tag, "cid": cid, "did": did, "camp": camp, "other_camp": other_camp,
             "common": common, "don": don, "alloc": alloc, "disb": disb, "disb_body": disb_body}
-
-
-def post(body):
-    code, resp = call("POST", "/api/transactions", body)
-    return code, resp
 
 
 def test_over_allocation_refused(world):
     w = world
-    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 5000, "parent_tx_id": w["don"]})
+    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 5000, "parent_tx_id": w["don"]}, w)
     assert code == 400, body
     assert "4000" in body["error"]          # 10000 - 6000 left
 
 
 def test_over_spend_refused(world):
     w = world
-    code, body = post({**w["disb_body"], "amount": 4000})
+    code, body = post({**w["disb_body"], "amount": 4000}, w)
     assert code == 400, body
     assert "3500" in body["error"]          # 6000 - 2500 left
 
 
 def test_wrong_parent_type_refused(world):
     w = world
-    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 100, "parent_tx_id": w["alloc"]})
+    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 100, "parent_tx_id": w["alloc"]}, w)
     assert code == 400, body
-    code, body = post({**w["disb_body"], "amount": 100, "parent_tx_id": w["don"]})
+    code, body = post({**w["disb_body"], "amount": 100, "parent_tx_id": w["don"]}, w)
     assert code == 400, body
 
 
 def test_missing_parent_refused(world):
     w = world
-    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 100})
+    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 100}, w)
     assert code == 400, body
-    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 100, "parent_tx_id": "does-not-exist"})
+    code, body = post({**w["common"], "tx_type": "ALLOCATION", "amount": 100, "parent_tx_id": "does-not-exist"}, w)
     assert code == 400, body
 
 
 def test_wrong_currency_refused(world):
     w = world
     code, body = post({**w["common"], "currency": "EUR", "tx_type": "ALLOCATION", "amount": 100,
-                       "parent_tx_id": w["don"]})
+                       "parent_tx_id": w["don"]}, w)
     assert code == 400, body
     assert "currency" in body["error"].lower()
 
@@ -134,27 +136,38 @@ def test_wrong_currency_refused(world):
 def test_wrong_campaign_refused(world):
     w = world
     code, body = post({**w["common"], "campaign_id": w["other_camp"], "tx_type": "ALLOCATION", "amount": 100,
-                       "parent_tx_id": w["don"]})
+                       "parent_tx_id": w["don"]}, w)
     assert code == 400, body
     assert "campaign" in body["error"].lower()
 
 
+def test_actor_rules(world):
+    """Route protection: no token = 401; wrong role or someone else's id = 403; nothing is stored."""
+    w = world
+    alloc = {**w["common"], "tx_type": "ALLOCATION", "amount": 100, "parent_tx_id": w["don"]}
+    assert call("POST", "/api/transactions", alloc)[0] == 401                                  # no token
+    assert call("POST", "/api/transactions", alloc, w["donor_token"])[0] == 403                # donor cannot allocate
+    assert call("POST", "/api/transactions", alloc, w["finance_token"])[0] == 403              # finance cannot allocate
+    disb = {**w["disb_body"], "amount": 100}
+    assert call("POST", "/api/transactions", disb, w["charity_token"])[0] == 403               # admin cannot disburse
+    assert call("POST", "/api/transactions", disb, w["donor_token"])[0] == 403
+    other_donor = {**w["common"], "tx_type": "DONATION", "amount": 100, "donor_id": str(uuid.uuid4())}
+    code, body = call("POST", "/api/transactions", other_donor, w["donor_token"])
+    assert code == 403 and "donor_id" in body["error"], body                                   # not your donor_id
+    other_charity = {**alloc, "charity_id": str(uuid.uuid4())}
+    assert call("POST", "/api/transactions", other_charity, w["charity_token"])[0] == 403      # not your charity
+
+
 def test_pending_parent_refused():
     """A parent that is not COMMITTED yet must be refused. Racy by nature: skipped if the sync won the race."""
-    try:
-        call("GET", "/api/transactions?limit=1")
-    except (urllib.error.URLError, OSError):
-        pytest.skip(f"gateway not reachable at {BASE}")
+    require_gateway()
     tag = secrets.token_hex(4)
-    code, charity = call("POST", "/api/charities", {"name": f"VAL P {tag}", "description": "x", "wallet_ref": f"w-p-{tag}"})
-    code, donor = call("POST", "/api/donors", {"display_name": f"VAL P {tag}", "email": f"p-{tag}@example.com"})
-    cid = charity["charity_id"]
+    cid, actors = setup_charity(tag)
     camp = new_campaign(cid, tag)
     common = {"currency": "USD", "charity_id": cid, "campaign_id": camp}
-    code, don = call("POST", "/api/transactions", {**common, "tx_type": "DONATION", "amount": 1000,
-                                                   "donor_id": donor["donor_id"]})
+    code, don = post({**common, "tx_type": "DONATION", "amount": 1000, "donor_id": actors["donor_id"]}, actors)
     assert code == 201, don
-    code, body = post({**common, "tx_type": "ALLOCATION", "amount": 500, "parent_tx_id": don["tx_id"]})
+    code, body = post({**common, "tx_type": "ALLOCATION", "amount": 500, "parent_tx_id": don["tx_id"]}, actors)
     if code == 201:
         pytest.skip("donation was already COMMITTED, the pending window was missed")
     assert code == 400 and "not confirmed" in body["error"], body
@@ -162,21 +175,16 @@ def test_pending_parent_refused():
 
 def test_concurrent_over_allocation_only_one_wins():
     """Two parallel ALLOCATIONs of 6000 against a 10000 donation: the lock lets exactly one through."""
-    try:
-        call("GET", "/api/transactions?limit=1")
-    except (urllib.error.URLError, OSError):
-        pytest.skip(f"gateway not reachable at {BASE}")
+    require_gateway()
     tag = secrets.token_hex(4)
-    code, charity = call("POST", "/api/charities", {"name": f"VAL C {tag}", "description": "x", "wallet_ref": f"w-c-{tag}"})
-    code, donor = call("POST", "/api/donors", {"display_name": f"VAL C {tag}", "email": f"c-{tag}@example.com"})
-    cid = charity["charity_id"]
+    cid, actors = setup_charity(tag)
     camp = new_campaign(cid, tag)
     common = {"currency": "USD", "charity_id": cid, "campaign_id": camp}
-    don = committed({**common, "tx_type": "DONATION", "amount": 10000, "donor_id": donor["donor_id"]})
+    don = committed({**common, "tx_type": "DONATION", "amount": 10000, "donor_id": actors["donor_id"]}, actors)
     results = []
 
     def go():
-        results.append(post({**common, "tx_type": "ALLOCATION", "amount": 6000, "parent_tx_id": don})[0])
+        results.append(post({**common, "tx_type": "ALLOCATION", "amount": 6000, "parent_tx_id": don}, actors)[0])
 
     threads = [threading.Thread(target=go) for _ in range(2)]
     for t in threads:
